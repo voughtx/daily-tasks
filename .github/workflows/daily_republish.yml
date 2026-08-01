@@ -29,7 +29,7 @@ jobs:
           PUBLISH_SECRET: ${{ secrets.PUBLISH_SECRET }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
           CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
-        run: python scripts/daily_republish.py
+        run: python -u scripts/daily_republish.py
 
       # KEEPALIVE: har run pe last_run.txt commit hota hai.
       # Isse repo me hamesha "activity" rehti hai -> GitHub 60-din inactivity wala
