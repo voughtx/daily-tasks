@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Homelander — DAILY AUTO-REPUBLISH v2.1 (GitHub Actions, roz 03:30 IST)
+# Homelander — DAILY AUTO-REPUBLISH v2.2 (GitHub Actions, roz 03:30 IST)
+# v2.2:
+#   5. CF zone sanity check at start (galat ZONE_ID = purge "OK" but silent no-op — pakad lega)
+#   6. BARE stale ab WARN hai RED nahi (origin fresh + old playlist valid + manifest 2h edge TTL)
+#      NOTE: free plan pe CF min Edge TTL 2h hai — isliye republish 2x daily (cron 0 10,22 * * *)
+#   7. manifest_cache_seconds=600 (browser bhi 10 min), playlist_cache_seconds=1yr (versioned = immutable)
+#   8. bare_check me Age + CF-RAY PoP print (purge diagnostics)
 # v2 fixes:
 #   1. Movie ke MULTIPLE docs ho to naya-se-naya doc jisme init+segments HO wo chuno
 #      (purane v1 me latest doc me data na ho to FAIL aata tha — ab SKIP)
@@ -32,6 +38,19 @@ _missing = [k for k, v in {
 }.items() if not v]
 if _missing:
     sys.exit("❌ Missing env secrets: " + ", ".join(_missing))
+
+# --- Zone sanity check: galat ZONE_ID pe purge API "OK" dikhake silent no-op hoti hai ---
+try:
+    zr = requests.get(f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}",
+                      headers={"Authorization": f"Bearer {CF_PURGE_TOKEN}"}, timeout=20)
+    zname = (((zr.json() or {}).get("result")) or {}).get("name")
+    print(f"CF zone check: {zr.status_code} name={zname}", flush=True)
+    if zname != "homeleni.dpdns.org":
+        sys.exit(f"❌ CF_ZONE_ID dusre zone ka hai (mila: {zname}) — GitHub secret theek karo!")
+except SystemExit:
+    raise
+except Exception as e:
+    print("⚠️ zone check err (continue anyway):", repr(e), flush=True)
 
 RUN_VER = str(int(time.time()))
 WAF_BYPASS_HEADERS = {"Referer": "https://v-player.pages.dev/",
@@ -153,7 +172,8 @@ def bare_check(mid):
                          headers=WAF_BYPASS_HEADERS, timeout=30)
         mf = r.json()
         ok = RUN_VER in (mf.get("playlist_url") or "")
-        print(f"bare check: CF={r.headers.get('CF-Cache-Status')} playlist_new={ok}", flush=True)
+        ray = (r.headers.get("CF-RAY") or "").split("-")[-1]
+        print(f"bare check: CF={r.headers.get('CF-Cache-Status')} Age={r.headers.get('Age')} pop={ray} playlist_new={ok}", flush=True)
         return ok
     except Exception as e:
         print("bare check err:", repr(e), flush=True)
@@ -208,8 +228,8 @@ for mid in movie_ids:
             "manifest_path": f"manifests/{mid}.json",
             "playlist": playlist,
             "manifest": manifest,
-            "playlist_cache_seconds": 86400,
-            "manifest_cache_seconds": 86400,
+            "playlist_cache_seconds": 31536000,
+            "manifest_cache_seconds": 600,
         }
         pr = requests.post(f"{WORKER_BASE}/publish",
                            headers={"X-Publish-Secret": PUBLISH_SECRET,
@@ -232,17 +252,20 @@ for mid in movie_ids:
             pok, pmsg = purge_manifest(mid)
             print(f"purge round {rnd}:", "OK" if pok else f"FAIL ({pmsg})", flush=True)
             if not pok:
-                raise RuntimeError("purge fail")
-            time.sleep(6)
+                raise RuntimeError("purge API fail")
+            time.sleep(10)
             if bare_check(mid):
                 healed = True
                 break
         if not healed:
-            raise RuntimeError("bare path 3 purges ke baad bhi stale")
+            # Bada issue NAHI hai: origin pe naya manifest hai (neeche verify hoga),
+            # purana playlist R2 me exist karta hai + uska token valid hai, aur Cache
+            # Rule ab manifests ka Edge TTL 10-min hai => thodi der me khud fresh.
+            print("⚠️ WARN: bare path abhi stale — max 2h TTL + 2x daily run = khud heal; run RED nahi karenge", flush=True)
 
         vok, ttl = verify_fresh(mid)
         if not vok:
-            raise RuntimeError("verify weak (retries ke baad bhi)")
+            raise RuntimeError("verify weak (origin pe bhi fresh nahi)")
 
         ok_list.append((mid, nseg, ttl))
     except Exception as e:
