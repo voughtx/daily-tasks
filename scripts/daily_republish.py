@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# Homelander — DAILY AUTO-REPUBLISH v2 (GitHub Actions, roz 03:30 IST)
+# Homelander — DAILY AUTO-REPUBLISH v2.1 (GitHub Actions, roz 03:30 IST)
 # v2 fixes:
 #   1. Movie ke MULTIPLE docs ho to naya-se-naya doc jisme init+segments HO wo chuno
 #      (purane v1 me latest doc me data na ho to FAIL aata tha — ab SKIP)
 #   2. Verify ab cache-bust query se karta hai (US/global edge pe purana manifest
 #      dikhne wali race khatam) + retry loop
 #   3. SKIP (Mongo me data hi nahi) ko run FAIL nahi karta — sirf real errors pe red
+# v2.1:
+#   4. BARE-PATH self-heal: purge ke baad bare manifest URL (real user path) se
+#      check karta hai; tiered-cache stale re-seed mila toh dobara purge (max 3 rounds)
 #
 # ENV (repo secrets se): MONGO_URI, PUBLISH_SECRET, CF_ZONE_ID, CF_PURGE_TOKEN
 
@@ -142,6 +145,21 @@ def purge_manifest(mid):
     return ok, f"{r.status_code} {r.text[:150]}"
 
 
+def bare_check(mid):
+    """Bare manifest URL (NO query) pado — REAL user path. Yeh GET edge ko
+    origin se fresh seed bhi karti hai aur batati hai real path fresh hai kya."""
+    try:
+        r = requests.get(f"{CDN_BASE}/manifests/{mid}.json",
+                         headers=WAF_BYPASS_HEADERS, timeout=30)
+        mf = r.json()
+        ok = RUN_VER in (mf.get("playlist_url") or "")
+        print(f"bare check: CF={r.headers.get('CF-Cache-Status')} playlist_new={ok}", flush=True)
+        return ok
+    except Exception as e:
+        print("bare check err:", repr(e), flush=True)
+        return False
+
+
 def verify_fresh(mid, attempts=5, gap=4):
     """Cache-bust query se manifest pado — stale edge ki race nahi. Har attempt fresh."""
     for a in range(1, attempts + 1):
@@ -206,10 +224,21 @@ for mid in movie_ids:
             raise RuntimeError(f"publish fail: {pr.status_code} {pr.text[:200]}")
         print(f"publish OK | {nseg} segs | {playlist_path}", flush=True)
 
-        pok, pmsg = purge_manifest(mid)
-        print("purge:", "OK" if pok else f"FAIL ({pmsg})", flush=True)
-        if not pok:
-            raise RuntimeError("purge fail")
+        # purge + bare-path self-heal (tiered-cache stale re-seed race ka ilaaj):
+        # purge -> 6s wait -> bare GET (real path seed+check) -> stale ho toh
+        # dobara purge. Max 3 rounds.
+        healed = False
+        for rnd in range(1, 4):
+            pok, pmsg = purge_manifest(mid)
+            print(f"purge round {rnd}:", "OK" if pok else f"FAIL ({pmsg})", flush=True)
+            if not pok:
+                raise RuntimeError("purge fail")
+            time.sleep(6)
+            if bare_check(mid):
+                healed = True
+                break
+        if not healed:
+            raise RuntimeError("bare path 3 purges ke baad bhi stale")
 
         vok, ttl = verify_fresh(mid)
         if not vok:
