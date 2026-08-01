@@ -6,6 +6,9 @@
 #      NOTE: free plan pe CF min Edge TTL 2h hai — isliye republish 2x daily (cron 0 10,22 * * *)
 #   7. manifest_cache_seconds=600 (browser bhi 10 min), playlist_cache_seconds=1yr (versioned = immutable)
 #   8. bare_check me Age + CF-RAY PoP print (purge diagnostics)
+# v2.3:
+#   9. files-purge is zone pe systematic FAIL (success:true phir bhi entry nahi hatti,
+#      Age climbing proven) → PREFIX purge (`host/manifests/`) par switch
 # v2 fixes:
 #   1. Movie ke MULTIPLE docs ho to naya-se-naya doc jisme init+segments HO wo chuno
 #      (purane v1 me latest doc me data na ho to FAIL aata tha — ab SKIP)
@@ -155,11 +158,14 @@ def build_manifest(mid, doc, playlist_url):
 
 
 def purge_manifest(mid):
+    # PREFIX purge (files wali is zone pe silently fail hui — Age climbing proof).
+    # Purge host = CDN domain; saare manifests (query variants samet) clear.
+    host = CDN_BASE.split("://", 1)[1]
     r = requests.post(
         f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/purge_cache",
         headers={"Authorization": f"Bearer {CF_PURGE_TOKEN}",
                  "Content-Type": "application/json"},
-        json={"files": [f"{CDN_BASE}/manifests/{mid}.json"]}, timeout=30)
+        json={"prefixes": [host + "/manifests/"]}, timeout=30)
     ok = r.status_code == 200 and (r.json() or {}).get("success")
     return ok, f"{r.status_code} {r.text[:150]}"
 
