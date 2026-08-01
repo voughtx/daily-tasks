@@ -1,0 +1,3 @@
+last_run_utc: 2026-08-01 08:59:22 UTC
+last_run_ist: 2026-08-01 14:29:22 IST
+result: failure
