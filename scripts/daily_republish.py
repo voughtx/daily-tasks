@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-# Homelander — DAILY AUTO-REPUBLISH (GitHub Actions, roz 03:30 IST)
-# Kya karta hai:
-#   1. Mongo se saari active movies padhta hai
-#   2. Har movie ka NAYA versioned playlist banata hai (naya fresh 25h token Worker se)
-#   3. Worker /publish pe bhejta hai
-#   4. Cloudflare manifest cache purge karta hai (sirf manifest — segments/playlists untouched)
-#   5. Verify karta hai fresh token mila
-# Result: token KABHI expire nahi hota. Purani versioned playlists R2 me rehti hain
-# (tiny text files ~20KB, saal me ~7MB/movie — cleanup baad me dashboard/Worker se).
+# Homelander — DAILY AUTO-REPUBLISH v2 (GitHub Actions, roz 03:30 IST)
+# v2 fixes:
+#   1. Movie ke MULTIPLE docs ho to naya-se-naya doc jisme init+segments HO wo chuno
+#      (purane v1 me latest doc me data na ho to FAIL aata tha — ab SKIP)
+#   2. Verify ab cache-bust query se karta hai (US/global edge pe purana manifest
+#      dikhne wali race khatam) + retry loop
+#   3. SKIP (Mongo me data hi nahi) ko run FAIL nahi karta — sirf real errors pe red
 #
-# ENV (repo secrets se aati hain):
-#   MONGO_URI, PUBLISH_SECRET, CF_ZONE_ID, CF_PURGE_TOKEN
+# ENV (repo secrets se): MONGO_URI, PUBLISH_SECRET, CF_ZONE_ID, CF_PURGE_TOKEN
 
 import os, re, json, time, math, sys
 import requests
@@ -37,13 +34,12 @@ RUN_VER = str(int(time.time()))
 WAF_BYPASS_HEADERS = {"Referer": "https://v-player.pages.dev/",
                       "Origin": "https://v-player.pages.dev"}
 
-print(f"=== DAILY REPUBLISH START | RUN_VER={RUN_VER} ===")
+print(f"=== DAILY REPUBLISH v2 START | RUN_VER={RUN_VER} ===", flush=True)
 coll = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000)[DB_NAME][COLL]
 
-# saare unique movie_ids (int/str mix ho sakta hai)
 raw_ids = coll.distinct("movie_id")
 movie_ids = sorted({str(x) for x in raw_ids})
-print(f"Mongo me movies mili: {len(movie_ids)} -> {movie_ids}\n")
+print(f"Mongo me movies mili: {len(movie_ids)} -> {movie_ids}\n", flush=True)
 
 
 def to_cdn(worker_url):
@@ -52,11 +48,20 @@ def to_cdn(worker_url):
     return u
 
 
+def find_good_doc(mid):
+    """Movie ke newest-se-oldest docs scan karke pehla doc do jisme init+segments ho."""
+    orq = [{"movie_id": mid}]
+    if mid.isdigit():
+        orq.append({"movie_id": int(mid)})
+    for doc in coll.find({"$or": orq}).sort("timestamp", -1).limit(10):
+        if (doc.get("init") or {}).get("worker_url") and doc.get("segments"):
+            return doc
+    return None
+
+
 def build_playlist(doc):
     segs = doc.get("segments") or []
     init = doc.get("init") or {}
-    if not segs or not init:
-        raise ValueError("init/segments missing")
     cdn_init = to_cdn(init["worker_url"])
     cdn_segs = [to_cdn(s["worker_url"]) for s in segs]
     durs = []
@@ -137,17 +142,42 @@ def purge_manifest(mid):
     return ok, f"{r.status_code} {r.text[:150]}"
 
 
-ok_count, results = 0, []
+def verify_fresh(mid, attempts=5, gap=4):
+    """Cache-bust query se manifest pado — stale edge ki race nahi. Har attempt fresh."""
+    for a in range(1, attempts + 1):
+        try:
+            r = requests.get(f"{CDN_BASE}/manifests/{mid}.json?_gh={RUN_VER}&a={a}",
+                             headers=WAF_BYPASS_HEADERS, timeout=30)
+            mf = r.json()
+            fa = mf.get("fallback_auth") or {}
+            ttl = int(fa.get("exp", 0)) - int(time.time())
+            new_ok = RUN_VER in (mf.get("playlist_url") or "")
+            print(f"verify try {a}: playlist_new={new_ok} | token ttl ~{ttl}s", flush=True)
+            if new_ok and ttl > 23 * 3600:
+                return True, ttl
+        except Exception as e:
+            print(f"verify try {a}: err {e!r}", flush=True)
+        time.sleep(gap)
+    return False, 0
+
+
+ok_list, skip_list, fail_list = [], [], []
 
 for mid in movie_ids:
-    print(f"\n----- movie {mid} -----")
+    print(f"\n----- movie {mid} -----", flush=True)
     try:
-        orq = [{"movie_id": mid}]
-        if mid.isdigit():
-            orq.append({"movie_id": int(mid)})
-        doc = coll.find_one({"$or": orq}, sort=[("timestamp", -1)])
+        doc = find_good_doc(mid)
         if not doc:
-            raise ValueError("Mongo doc nahi mila")
+            title = ""
+            try:
+                anydoc = coll.find_one({"$or": [{"movie_id": mid},
+                                                {"movie_id": int(mid) if mid.isdigit() else mid}]})
+                title = (anydoc or {}).get("title") or ""
+            except Exception:
+                pass
+            print(f"SKIP: Mongo me init/segments wala doc nahi (title: {title})", flush=True)
+            skip_list.append((mid, title))
+            continue
 
         playlist, nseg = build_playlist(doc)
         playlist_path = f"playlists/{mid}.v{RUN_VER}.m3u8"
@@ -174,34 +204,35 @@ for mid in movie_ids:
             pass
         if pr.status_code != 200 or not pj.get("ok"):
             raise RuntimeError(f"publish fail: {pr.status_code} {pr.text[:200]}")
-        print(f"publish OK | {nseg} segs | {playlist_path}")
+        print(f"publish OK | {nseg} segs | {playlist_path}", flush=True)
 
         pok, pmsg = purge_manifest(mid)
-        print("purge:", "OK" if pok else f"FAIL ({pmsg})")
-
-        time.sleep(2)
-        mf = requests.get(f"{CDN_BASE}/manifests/{mid}.json",
-                          headers=WAF_BYPASS_HEADERS, timeout=30).json()
-        fa = mf.get("fallback_auth") or {}
-        ttl = int(fa.get("exp", 0)) - int(time.time())
-        new_url_ok = RUN_VER in (mf.get("playlist_url") or "")
-        print(f"verify: playlist_new={new_url_ok} | token ttl ~{ttl}s")
-        if not (new_url_ok and ttl > 23 * 3600):
-            raise RuntimeError(f"verify weak: new_url={new_url_ok} ttl={ttl}")
+        print("purge:", "OK" if pok else f"FAIL ({pmsg})", flush=True)
         if not pok:
-            raise RuntimeError("purge fail tha")
+            raise RuntimeError("purge fail")
 
-        ok_count += 1
-        results.append((mid, "OK", nseg, ttl))
+        vok, ttl = verify_fresh(mid)
+        if not vok:
+            raise RuntimeError("verify weak (retries ke baad bhi)")
+
+        ok_list.append((mid, nseg, ttl))
     except Exception as e:
-        print("❌ FAIL:", repr(e))
-        results.append((mid, "FAIL", 0, 0))
+        print("❌ FAIL:", repr(e), flush=True)
+        fail_list.append((mid, repr(e)[:120]))
 
-print("\n================ SUMMARY ================")
-for mid, st, nseg, ttl in results:
-    print(f"{mid}: {st}" + (f" | {nseg} segs | ttl ~{ttl}s" if st == "OK" else ""))
-print(f"TOTAL: {ok_count}/{len(movie_ids)} movies refreshed")
-print("==========================================")
-if ok_count != len(movie_ids):
-    sys.exit(1)  # Action ko RED dikhao taaki pata chale
-print("✅ SAB MOVIES FRESH — agle 25h tak token tension nahi")
+print("\n================ SUMMARY ================", flush=True)
+for mid, nseg, ttl in ok_list:
+    print(f"{mid}: OK | {nseg} segs | ttl ~{ttl}s", flush=True)
+for mid, title in skip_list:
+    print(f"{mid}: SKIP (Mongo me segments data nahi) | {title}", flush=True)
+for mid, err in fail_list:
+    print(f"{mid}: FAIL | {err}", flush=True)
+print(f"TOTAL: OK={len(ok_list)} | SKIP={len(skip_list)} | FAIL={len(fail_list)} "
+      f"(Mongo total {len(movie_ids)})", flush=True)
+print("==========================================", flush=True)
+
+# SKIP se run RED nahi hota (un movies me dekhne ko hai hi nahi).
+# RED sirf tab jab data wali movie publish/purge/verify me fail ho.
+if fail_list:
+    sys.exit(1)
+print(f"✅ DONE — {len(ok_list)} movies fresh for ~25h | {len(skip_list)} skipped (incomplete data)", flush=True)
