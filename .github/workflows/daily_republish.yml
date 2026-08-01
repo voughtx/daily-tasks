@@ -1,0 +1,50 @@
+name: Daily R2 Republish (03:30 IST)
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 22:00 UTC = roz 03:30 IST
+  workflow_dispatch: {}     # manual "Run workflow" button bhi
+
+permissions:
+  contents: write   # keepalive commit ke liye zaroori
+
+jobs:
+  republish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install pymongo requests
+
+      - name: Republish all active movies
+        id: republish
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          PUBLISH_SECRET: ${{ secrets.PUBLISH_SECRET }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
+        run: python scripts/daily_republish.py
+
+      # KEEPALIVE: har run pe last_run.txt commit hota hai.
+      # Isse repo me hamesha "activity" rehti hai -> GitHub 60-din inactivity wala
+      # scheduled-workflow auto-disable KABHI nahi lagega. Bonus: last run ka
+      # status repo me hi dikhta hai.
+      - name: Keepalive + run log commit
+        if: always()
+        run: |
+          {
+            echo "last_run_utc: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "last_run_ist: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S IST')"
+            echo "result: ${{ steps.republish.outcome }}"
+          } > last_run.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_run.txt
+          git commit -m "keepalive: republish run $(date -u '+%Y-%m-%d %H:%M UTC')" || echo "nothing to commit"
+          git push
