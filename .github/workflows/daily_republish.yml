@@ -2,8 +2,13 @@ name: Daily R2 Republish (03:30 IST)
 
 on:
   schedule:
-    - cron: "0 22 * * *"   # 22:00 UTC = roz 03:30 IST
-  workflow_dispatch: {}     # manual "Run workflow" button bhi
+    - cron: "0 22 * * *"   # 22:00 UTC = roz RAAT 03:30 IST (SIRF yahi automatic run)
+  workflow_dispatch:
+    inputs:
+      movie_id:
+        description: "Sirf yeh movie republish karo (khaali chhodo = saari movies)"
+        required: false
+        default: ""
 
 permissions:
   contents: write   # keepalive commit ke liye zaroori
@@ -22,13 +27,14 @@ jobs:
       - name: Install deps
         run: pip install pymongo requests
 
-      - name: Republish all active movies
+      - name: Republish movies (sab ya single)
         id: republish
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           PUBLISH_SECRET: ${{ secrets.PUBLISH_SECRET }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
           CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
+          TARGET_MOVIE_ID: ${{ github.event.inputs.movie_id }}
         run: python -u scripts/daily_republish.py
 
       # KEEPALIVE: har run pe last_run.txt commit hota hai.
