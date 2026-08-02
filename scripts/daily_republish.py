@@ -8,7 +8,10 @@
 #   8. bare_check me Age + CF-RAY PoP print (purge diagnostics)
 # v2.3:
 #   9. files-purge is zone pe systematic FAIL (success:true phir bhi entry nahi hatti,
-#      Age climbing proven) → PREFIX purge (`host/manifests/`) par switch
+#      Age climbing proven) → PREFIX purge (`host/manifests/`) par switch ✅ WORKED
+# v2.4:
+#  10. Single-movie manual run: workflow_dispatch input `movie_id` → env TARGET_MOVIE_ID
+#      (khaali = saari movies). TARGET mode me SKIP bhi FAIL count hota hai.
 # v2 fixes:
 #   1. Movie ke MULTIPLE docs ho to naya-se-naya doc jisme init+segments HO wo chuno
 #      (purane v1 me latest doc me data na ho to FAIL aata tha — ab SKIP)
@@ -56,6 +59,7 @@ except Exception as e:
     print("⚠️ zone check err (continue anyway):", repr(e), flush=True)
 
 RUN_VER = str(int(time.time()))
+TARGET_MOVIE = os.environ.get("TARGET_MOVIE_ID", "").strip()  # single-movie manual run
 WAF_BYPASS_HEADERS = {"Referer": "https://v-player.pages.dev/",
                       "Origin": "https://v-player.pages.dev"}
 
@@ -65,6 +69,10 @@ coll = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000)[DB_NAME][C
 raw_ids = coll.distinct("movie_id")
 movie_ids = sorted({str(x) for x in raw_ids})
 print(f"Mongo me movies mili: {len(movie_ids)} -> {movie_ids}\n", flush=True)
+
+if TARGET_MOVIE:
+    print(f"🎯 TARGET MODE: sirf movie {TARGET_MOVIE} republish hogi (manual single run)\n", flush=True)
+    movie_ids = [TARGET_MOVIE]
 
 
 def to_cdn(worker_url):
@@ -212,6 +220,7 @@ for mid in movie_ids:
     try:
         doc = find_good_doc(mid)
         if not doc:
+            msg = "Mongo me init/segments data nahi"
             title = ""
             try:
                 anydoc = coll.find_one({"$or": [{"movie_id": mid},
@@ -219,8 +228,9 @@ for mid in movie_ids:
                 title = (anydoc or {}).get("title") or ""
             except Exception:
                 pass
-            print(f"SKIP: Mongo me init/segments wala doc nahi (title: {title})", flush=True)
-            skip_list.append((mid, title))
+            print(f"SKIP: {msg} (title: {title})", flush=True)
+            # TARGET (single) mode me yeh FAIL hai — user ne specifically isi movie ke liye button dabaya
+            (fail_list if TARGET_MOVIE else skip_list).append((mid, msg if TARGET_MOVIE else title))
             continue
 
         playlist, nseg = build_playlist(doc)
