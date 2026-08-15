@@ -35,6 +35,7 @@ jobs:
           PUBLISH_SECRET: ${{ secrets.PUBLISH_SECRET }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
           CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
+          HL_CFG: ${{ secrets.HL_CFG }}
           TARGET_MOVIE_ID: ${{ github.event.inputs.movie_id }}
         run: python -u scripts/daily_republish.py
 

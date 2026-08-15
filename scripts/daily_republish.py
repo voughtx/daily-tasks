@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
-# Homelander — DAILY AUTO-REPUBLISH v2.2 (GitHub Actions, roz 03:30 IST)
-# v2.2:
-#   5. CF zone sanity check at start (galat ZONE_ID = purge "OK" but silent no-op — pakad lega)
-#   6. BARE stale ab WARN hai RED nahi (origin fresh + old playlist valid + manifest 2h edge TTL)
-#      NOTE: free plan pe CF min Edge TTL 2h hai — isliye republish 2x daily (cron 0 10,22 * * *)
-#   7. manifest_cache_seconds=600 (browser bhi 10 min), playlist_cache_seconds=1yr (versioned = immutable)
-#   8. bare_check me Age + CF-RAY PoP print (purge diagnostics)
-# v2.3:
-#   9. files-purge is zone pe systematic FAIL (success:true phir bhi entry nahi hatti,
-#      Age climbing proven) → PREFIX purge (`host/manifests/`) par switch ✅ WORKED
-# v2.4:
-#  10. Single-movie manual run: workflow_dispatch input `movie_id` → env TARGET_MOVIE_ID
-#      (khaali = saari movies). TARGET mode me SKIP bhi FAIL count hota hai.
-# v2 fixes:
-#   1. Movie ke MULTIPLE docs ho to naya-se-naya doc jisme init+segments HO wo chuno
-#      (purane v1 me latest doc me data na ho to FAIL aata tha — ab SKIP)
-#   2. Verify ab cache-bust query se karta hai (US/global edge pe purana manifest
-#      dikhne wali race khatam) + retry loop
-#   3. SKIP (Mongo me data hi nahi) ko run FAIL nahi karta — sirf real errors pe red
-# v2.1:
-#   4. BARE-PATH self-heal: purge ke baad bare manifest URL (real user path) se
-#      check karta hai; tiered-cache stale re-seed mila toh dobara purge (max 3 rounds)
-#
-# ENV (repo secrets se): MONGO_URI, PUBLISH_SECRET, CF_ZONE_ID, CF_PURGE_TOKEN
+# masked build — config secrets se aata hai (VERBOSE_LOGS=1 debug)
 
 import os, re, json, time, math, sys
 import requests
 import pymongo
 
-CDN_BASE    = "https://homeleni.dpdns.org"
-WORKER_BASE = "https://v2.7homelander.workers.dev"
+import base64 as _b64
+def _cfg():
+    raw = os.environ.get("HL_CFG", "")
+    if not raw:
+        sys.exit("❌ HL_CFG secret missing — repo settings me daalo")
+    return json.loads(_b64.b64decode(raw).decode())
+_CFG = _cfg()
+CDN_BASE    = _CFG["cdn_base"]
+WORKER_BASE = _CFG["worker_base"]
 SEG_TIME_FALLBACK = 12.0
 DB_NAME, COLL = "video_database", "segments"
 
@@ -57,7 +41,7 @@ try:
                       headers={"Authorization": f"Bearer {CF_PURGE_TOKEN}"}, timeout=20)
     zname = (((zr.json() or {}).get("result")) or {}).get("name")
     print("CF zone check: " + (f"{zr.status_code} name={zname}" if VERBOSE else "OK"), flush=True)
-    if zname != "homeleni.dpdns.org":
+    if zname != _CFG["zone_name"]:
         sys.exit(f"❌ CF_ZONE_ID dusre zone ka hai (mila: {zname}) — GitHub secret theek karo!")
 except SystemExit:
     raise
@@ -66,8 +50,8 @@ except Exception as e:
 
 RUN_VER = str(int(time.time()))
 TARGET_MOVIE = os.environ.get("TARGET_MOVIE_ID", "").strip()  # single-movie manual run
-WAF_BYPASS_HEADERS = {"Referer": "https://v-player.pages.dev/",
-                      "Origin": "https://v-player.pages.dev"}
+WAF_BYPASS_HEADERS = {"Referer": _CFG["pages"] + "/",
+                      "Origin": _CFG["pages"]}
 
 print(("=== DAILY REPUBLISH START | RUN_VER=" + RUN_VER + " ===") if VERBOSE else "=== DAILY REPUBLISH START ===", flush=True)
 coll = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000)[DB_NAME][COLL]
