@@ -45,12 +45,18 @@ _missing = [k for k, v in {
 if _missing:
     sys.exit("❌ Missing env secrets: " + ", ".join(_missing))
 
+# --- QUIET LOGS (public repo privacy): VERBOSE_LOGS=1 se full detail; default masked ---
+VERBOSE = os.environ.get("VERBOSE_LOGS", "").strip().lower() in ("1", "true", "yes")
+def mm(mid):
+    s = str(mid)
+    return (s[:4] + "…") if len(s) > 4 else s
+
 # --- Zone sanity check: galat ZONE_ID pe purge API "OK" dikhake silent no-op hoti hai ---
 try:
     zr = requests.get(f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}",
                       headers={"Authorization": f"Bearer {CF_PURGE_TOKEN}"}, timeout=20)
     zname = (((zr.json() or {}).get("result")) or {}).get("name")
-    print(f"CF zone check: {zr.status_code} name={zname}", flush=True)
+    print("CF zone check: " + (f"{zr.status_code} name={zname}" if VERBOSE else "OK"), flush=True)
     if zname != "homeleni.dpdns.org":
         sys.exit(f"❌ CF_ZONE_ID dusre zone ka hai (mila: {zname}) — GitHub secret theek karo!")
 except SystemExit:
@@ -63,15 +69,15 @@ TARGET_MOVIE = os.environ.get("TARGET_MOVIE_ID", "").strip()  # single-movie man
 WAF_BYPASS_HEADERS = {"Referer": "https://v-player.pages.dev/",
                       "Origin": "https://v-player.pages.dev"}
 
-print(f"=== DAILY REPUBLISH v2 START | RUN_VER={RUN_VER} ===", flush=True)
+print(("=== DAILY REPUBLISH START | RUN_VER=" + RUN_VER + " ===") if VERBOSE else "=== DAILY REPUBLISH START ===", flush=True)
 coll = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000)[DB_NAME][COLL]
 
 raw_ids = coll.distinct("movie_id")
 movie_ids = sorted({str(x) for x in raw_ids})
-print(f"Mongo me movies mili: {len(movie_ids)} -> {movie_ids}\n", flush=True)
+print(f"Mongo movies: {len(movie_ids)}" + (f" -> {movie_ids}" if VERBOSE else "") + "\n", flush=True)
 
 if TARGET_MOVIE:
-    print(f"🎯 TARGET MODE: sirf movie {TARGET_MOVIE} republish hogi (manual single run)\n", flush=True)
+    print("🎯 TARGET MODE: single movie" + (f" {TARGET_MOVIE}" if VERBOSE else "") + "\n", flush=True)
     movie_ids = [TARGET_MOVIE]
 
 
@@ -194,7 +200,7 @@ def bare_check(mid):
         mf = r.json()
         ok = RUN_VER in (mf.get("playlist_url") or "")
         ray = (r.headers.get("CF-RAY") or "").split("-")[-1]
-        print(f"bare check: CF={r.headers.get('CF-Cache-Status')} Age={r.headers.get('Age')} pop={ray} playlist_new={ok}", flush=True)
+        print(("bare check: CF=" + str(r.headers.get('CF-Cache-Status')) + " Age=" + str(r.headers.get('Age')) + " pop=" + ray + " playlist_new=" + str(ok)) if VERBOSE else ("bare check: " + ("fresh" if ok else "stale")), flush=True)
         return ok
     except Exception as e:
         print("bare check err:", repr(e), flush=True)
@@ -211,11 +217,11 @@ def verify_fresh(mid, attempts=5, gap=4):
             fa = mf.get("fallback_auth") or {}
             ttl = int(fa.get("exp", 0)) - int(time.time())
             new_ok = RUN_VER in (mf.get("playlist_url") or "")
-            print(f"verify try {a}: playlist_new={new_ok} | token ttl ~{ttl}s", flush=True)
+            print((f"verify try {a}: playlist_new={new_ok} | token ttl ~{ttl}s") if VERBOSE else f"verify try {a}: ok", flush=True)
             if new_ok and ttl > 23 * 3600:
                 return True, ttl
         except Exception as e:
-            print(f"verify try {a}: err {e!r}", flush=True)
+            print(f"verify try {a}: err {type(e).__name__}", flush=True)
         time.sleep(gap)
     return False, 0
 
@@ -223,7 +229,7 @@ def verify_fresh(mid, attempts=5, gap=4):
 ok_list, skip_list, fail_list = [], [], []
 
 for mid in movie_ids:
-    print(f"\n----- movie {mid} -----", flush=True)
+    print(f"\n----- movie {mm(mid)} -----", flush=True)
     try:
         doc = find_good_doc(mid)
         if not doc:
@@ -235,7 +241,7 @@ for mid in movie_ids:
                 title = (anydoc or {}).get("title") or ""
             except Exception:
                 pass
-            print(f"SKIP: {msg} (title: {title})", flush=True)
+            print(f"SKIP: {msg}" + (f" (title: {title})" if VERBOSE else ""), flush=True)
             # TARGET (single) mode me yeh FAIL hai — user ne specifically isi movie ke liye button dabaya
             (fail_list if TARGET_MOVIE else skip_list).append((mid, msg if TARGET_MOVIE else title))
             continue
@@ -265,7 +271,7 @@ for mid in movie_ids:
             pass
         if pr.status_code != 200 or not pj.get("ok"):
             raise RuntimeError(f"publish fail: {pr.status_code} {pr.text[:200]}")
-        print(f"publish OK | {nseg} segs | {playlist_path}", flush=True)
+        print(f"publish OK | {nseg} segs" + (f" | {playlist_path}" if VERBOSE else ""), flush=True)
 
         # purge + bare-path self-heal (tiered-cache stale re-seed race ka ilaaj):
         # purge -> 6s wait -> bare GET (real path seed+check) -> stale ho toh
@@ -273,7 +279,7 @@ for mid in movie_ids:
         healed = False
         for rnd in range(1, 4):
             pok, pmsg = purge_manifest(mid)
-            print(f"purge round {rnd}:", "OK" if pok else f"FAIL ({pmsg})", flush=True)
+            print(f"purge round {rnd}:", "OK" if pok else ("FAIL (" + pmsg + ")" if VERBOSE else "FAIL"), flush=True)
             if not pok:
                 raise RuntimeError("purge API fail")
             time.sleep(10)
@@ -292,16 +298,16 @@ for mid in movie_ids:
 
         ok_list.append((mid, nseg, ttl))
     except Exception as e:
-        print("❌ FAIL:", repr(e), flush=True)
-        fail_list.append((mid, repr(e)[:120]))
+        print("❌ FAIL:", repr(e) if VERBOSE else type(e).__name__, flush=True)
+        fail_list.append((mid, repr(e)[:120] if VERBOSE else type(e).__name__))
 
 print("\n================ SUMMARY ================", flush=True)
 for mid, nseg, ttl in ok_list:
-    print(f"{mid}: OK | {nseg} segs | ttl ~{ttl}s", flush=True)
+    print(f"{mm(mid)}: OK | {nseg} segs | ttl ~{ttl}s", flush=True)
 for mid, title in skip_list:
-    print(f"{mid}: SKIP (Mongo me segments data nahi) | {title}", flush=True)
+    print(f"{mm(mid)}: SKIP (data nahi)" + (f" | {title}" if VERBOSE else ""), flush=True)
 for mid, err in fail_list:
-    print(f"{mid}: FAIL | {err}", flush=True)
+    print(f"{mm(mid)}: FAIL | {err}", flush=True)
 print(f"TOTAL: OK={len(ok_list)} | SKIP={len(skip_list)} | FAIL={len(fail_list)} "
       f"(Mongo total {len(movie_ids)})", flush=True)
 print("==========================================", flush=True)

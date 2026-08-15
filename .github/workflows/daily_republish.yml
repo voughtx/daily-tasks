@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write   # keepalive commit ke liye zaroori
+  actions: write    # purane run logs delete karne ke liye (privacy)
 
 jobs:
   republish:
@@ -54,3 +55,41 @@ jobs:
           git add last_run.txt
           git commit -m "keepalive: republish run $(date -u '+%Y-%m-%d %H:%M UTC')" || echo "nothing to commit"
           git push
+
+      # 🧹 PRIVACY: public repo me purane run logs (movie IDs etc.) public dikhte hain.
+      # Har run ke end me apne SE pehle ke 2 SABSE PURANE completed runs delete karo.
+      # Apna current run delete NAHI hota (in-progress). Recent history debug ke liye rehti hai.
+      - name: Purge oldest 2 run logs (privacy)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          repo = os.environ["REPO"]
+          tok = os.environ["GH_TOKEN"]
+          cur = os.environ["CURRENT_RUN"]
+          def api(url, method="GET"):
+              req = urllib.request.Request(url, method=method,
+                  headers={"Authorization": "Bearer " + tok,
+                           "Accept": "application/vnd.github+json",
+                           "X-GitHub-Api-Version": "2022-11-28"})
+              return urllib.request.urlopen(req, timeout=30)
+          try:
+              runs = json.load(api(f"https://api.github.com/repos/{repo}/actions/runs?status=completed&per_page=100")).get("workflow_runs", [])
+              cands = [r for r in runs if str(r["id"]) != cur]
+              cands.sort(key=lambda r: r.get("created_at") or "")
+              deleted = 0
+              for r in cands[:2]:
+                  try:
+                      api(f"https://api.github.com/repos/{repo}/actions/runs/{r['id']}", method="DELETE")
+                      deleted += 1
+                      print("deleted run", r["id"])
+                  except Exception as e:
+                      print("skip", r["id"], type(e).__name__)
+              print("cleanup done:", deleted, "deleted")
+          except Exception as e:
+              print("cleanup err:", type(e).__name__, e)
+          PY
