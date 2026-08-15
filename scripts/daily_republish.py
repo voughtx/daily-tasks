@@ -87,15 +87,19 @@ def find_good_doc(mid):
     if mid.isdigit():
         orq.append({"movie_id": int(mid)})
     for doc in coll.find({"$or": orq}).sort("timestamp", -1).limit(10):
-        if (doc.get("init") or {}).get("worker_url") and doc.get("segments"):
-            return doc
+        if doc.get("segments"):
+            # TS (mpegts) me init nahi hota; fMP4 me init zaroori
+            if doc.get("container") == "mpegts" or (doc.get("init") or {}).get("worker_url"):
+                return doc
     return None
 
 
 def build_playlist(doc):
     segs = doc.get("segments") or []
     init = doc.get("init") or {}
-    cdn_init = to_cdn(init["worker_url"])
+    container = (doc.get("container") or "fmp4").lower()
+    has_init = bool(init.get("worker_url")) and container != "mpegts"
+    cdn_init = to_cdn(init["worker_url"]) if has_init else None
     cdn_segs = [to_cdn(s["worker_url"]) for s in segs]
     durs = []
     for s in segs:
@@ -105,7 +109,10 @@ def build_playlist(doc):
     target = max(1, math.ceil(max(durs)))
     L = ["#EXTM3U", "#EXT-X-VERSION:7", f"#EXT-X-TARGETDURATION:{target}",
          "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD",
-         "#EXT-X-INDEPENDENT-SEGMENTS", f'#EXT-X-MAP:URI="{cdn_init}"', ""]
+         "#EXT-X-INDEPENDENT-SEGMENTS"]
+    if has_init:
+        L.append(f'#EXT-X-MAP:URI="{cdn_init}"')
+    L.append("")
     for d, u in zip(durs, cdn_segs):
         L.append(f"#EXTINF:{d:.3f},")
         L.append(u)
