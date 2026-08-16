@@ -98,9 +98,8 @@ def build_playlist(doc):
                     else float(doc.get("segment_time") or SEG_TIME_FALLBACK))
     target = max(1, math.ceil(max(durs)))
     L = ["#EXTM3U", "#EXT-X-VERSION:7", f"#EXT-X-TARGETDURATION:{target}",
-         "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
-    if doc.get("split_by_time") is not True:
-        L.append("#EXT-X-INDEPENDENT-SEGMENTS")
+         "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD",
+         "#EXT-X-INDEPENDENT-SEGMENTS"]
     if has_init:
         L.append(f'#EXT-X-MAP:URI="{cdn_init}"')
     L.append("")
