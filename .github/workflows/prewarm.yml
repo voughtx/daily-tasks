@@ -1,0 +1,28 @@
+name: Segment Prewarm (edge warm)
+
+on:
+  schedule:
+    - cron: "35 22 * * *"   # 22:35 UTC = roz 04:05 IST (republish 03:30 ke BAAD)
+  workflow_dispatch:
+    inputs:
+      movie_id:
+        description: "Sirf yeh movie warm karo (khaali = saari)"
+        required: false
+        default: ""
+
+jobs:
+  prewarm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install requests
+      - name: Prewarm segments
+        env:
+          MOVIE_ID: ${{ github.event.inputs.movie_id }}
+          HL_CFG: ${{ secrets.HL_CFG }}
+        run: python -u scripts/prewarm.py
